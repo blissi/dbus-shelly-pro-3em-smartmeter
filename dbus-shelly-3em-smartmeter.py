@@ -22,6 +22,16 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/d
 from vedbus import VeDbusService
 
 
+class Phase:
+  def __init__(self, voltage, current, power, total_act_energy, act_ret_energy):
+    self.voltage = voltage
+    self.current = current
+    self.power = power
+    self.total_act_energy = total_act_energy / 1000
+    self.act_ret_energy = act_ret_energy / 1000
+
+
+
 class DbusShelly3emService:
   def __init__(self, paths, productname='Shelly 3EM', connection='Shelly 3EM HTTP JSON service'):
     config = self._getConfig()
@@ -58,11 +68,11 @@ class DbusShelly3emService:
     self._dbusservice.add_path('/ProductName', productname)
     self._dbusservice.add_path('/CustomName', customname)
     self._dbusservice.add_path('/Latency', None)
-    self._dbusservice.add_path('/FirmwareVersion', 0.1)
+    self._dbusservice.add_path('/FirmwareVersion', 0.2)
     self._dbusservice.add_path('/HardwareVersion', 0)
     self._dbusservice.add_path('/Connected', 1)
     self._dbusservice.add_path('/Role', role)
-    self._dbusservice.add_path('/Position', 0) # normaly only needed for pvinverter
+    self._dbusservice.add_path('/Position', self._getShellyPosition()) # normaly only needed for pvinverter
     self._dbusservice.add_path('/Serial', self._getShellySerial())
     self._dbusservice.add_path('/UpdateIndex', 0)
  
@@ -104,8 +114,18 @@ class DbusShelly3emService:
         value = 0
     
     return int(value)
-  
-  
+ 
+ 
+  def _getShellyPosition(self):
+    config = self._getConfig()
+    value = config['DEFAULT']['Position']
+    
+    if not value: 
+        value = 0
+    
+    return int(value)
+ 
+ 
   def _getShellyStatusUrl(self):
     config = self._getConfig()
     accessType = config['DEFAULT']['AccessType']
@@ -133,7 +153,6 @@ class DbusShelly3emService:
     if not meter_data:
         raise ValueError("Converting response to JSON failed")
     
-    
     return meter_data
  
  
@@ -144,28 +163,54 @@ class DbusShelly3emService:
     logging.info("--- End: sign of life ---")
     return True
  
+
+  def _getPhases(self, meter_data):
+    em0 = meter_data['em:0']
+    emdata0 = meter_data['emdata:0']
+    l1 = Phase(em0['a_voltage'], em0['a_current'], em0['a_act_power'], emdata0['a_total_act_energy'], emdata0['a_total_act_ret_energy'])
+    l2 = Phase(em0['b_voltage'], em0['b_current'], em0['b_act_power'], emdata0['b_total_act_energy'], emdata0['b_total_act_ret_energy'])
+    l3 = Phase(em0['c_voltage'], em0['c_current'], em0['c_act_power'], emdata0['c_total_act_energy'], emdata0['c_total_act_ret_energy'])
+
+    phases = [l1, l2, l3]
+
+    # Remap the L1 phase?
+    try:
+      config = self._getConfig()
+      remapL1 = int(config['ONPREMISE']['L1Position'])
+    except KeyError:
+      remapL1 = 1
+
+    if remapL1 > 1:
+      old_l1 = phases[0]
+      phases[0] = phases[remapL1 - 1]
+      phases[remapL1-1] = old_l1
+
+    return phases
+
+
   def _update(self):   
     try:
        #get data from Shelly 3em
        meter_data = self._getShellyData()
+       phases = self._getPhases(meter_data)
        
        #send data to DBus
        self._dbusservice['/Ac/Power'] = meter_data['em:0']['total_act_power'] # positive: consumption, negative: feed into grid
-       self._dbusservice['/Ac/L1/Voltage'] = meter_data['em:0']['a_voltage']
-       self._dbusservice['/Ac/L2/Voltage'] = meter_data['em:0']['b_voltage']
-       self._dbusservice['/Ac/L3/Voltage'] = meter_data['em:0']['c_voltage']
-       self._dbusservice['/Ac/L1/Current'] = meter_data['em:0']['a_current']
-       self._dbusservice['/Ac/L2/Current'] = meter_data['em:0']['b_current']
-       self._dbusservice['/Ac/L3/Current'] = meter_data['em:0']['c_current']
-       self._dbusservice['/Ac/L1/Power'] = meter_data['em:0']['a_act_power']
-       self._dbusservice['/Ac/L2/Power'] = meter_data['em:0']['b_act_power']
-       self._dbusservice['/Ac/L3/Power'] = meter_data['em:0']['c_act_power']
-       self._dbusservice['/Ac/L1/Energy/Forward'] = (meter_data['emdata:0']['a_total_act_energy']/1000)
-       self._dbusservice['/Ac/L2/Energy/Forward'] = (meter_data['emdata:0']['b_total_act_energy']/1000)
-       self._dbusservice['/Ac/L3/Energy/Forward'] = (meter_data['emdata:0']['c_total_act_energy']/1000)
-       self._dbusservice['/Ac/L1/Energy/Reverse'] = (meter_data['emdata:0']['a_total_act_ret_energy']/1000) 
-       self._dbusservice['/Ac/L2/Energy/Reverse'] = (meter_data['emdata:0']['b_total_act_ret_energy']/1000) 
-       self._dbusservice['/Ac/L3/Energy/Reverse'] = (meter_data['emdata:0']['c_total_act_ret_energy']/1000) 
+       self._dbusservice['/Ac/L1/Voltage'] = phases[0].voltage
+       self._dbusservice['/Ac/L2/Voltage'] = phases[1].voltage
+       self._dbusservice['/Ac/L3/Voltage'] = phases[2].voltage
+       self._dbusservice['/Ac/L1/Current'] = phases[0].current
+       self._dbusservice['/Ac/L2/Current'] = phases[1].current
+       self._dbusservice['/Ac/L3/Current'] = phases[2].current
+       self._dbusservice['/Ac/L1/Power'] = phases[0].power
+       self._dbusservice['/Ac/L2/Power'] = phases[1].power
+       self._dbusservice['/Ac/L3/Power'] = phases[2].power
+       self._dbusservice['/Ac/L1/Energy/Forward'] = phases[0].total_act_energy
+       self._dbusservice['/Ac/L2/Energy/Forward'] = phases[1].total_act_energy
+       self._dbusservice['/Ac/L3/Energy/Forward'] = phases[2].total_act_energy
+       self._dbusservice['/Ac/L1/Energy/Reverse'] = phases[0].total_act_ret_energy 
+       self._dbusservice['/Ac/L2/Energy/Reverse'] = phases[1].total_act_ret_energy 
+       self._dbusservice['/Ac/L3/Energy/Reverse'] = phases[2].total_act_ret_energy 
        
        # Old version
        #self._dbusservice['/Ac/Energy/Forward'] = self._dbusservice['/Ac/L1/Energy/Forward'] + self._dbusservice['/Ac/L2/Energy/Forward'] + self._dbusservice['/Ac/L3/Energy/Forward']
@@ -190,8 +235,8 @@ class DbusShelly3emService:
 
        #update lastupdate vars
        self._lastUpdate = time.time()
-    except (ValueError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, ConnectionError):
-       logging.critical('Error getting data from Shelly - check network or Shelly status. Setting power values to 0')
+    except (ValueError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, ConnectionError) as e:
+       logging.critical('Error getting data from Shelly - check network or Shelly status. Setting power values to 0. Details: %s', e, exc_info=e)       
        self._dbusservice['/Ac/L1/Power'] = 0                                       
        self._dbusservice['/Ac/L2/Power'] = 0                                       
        self._dbusservice['/Ac/L3/Power'] = 0
@@ -241,7 +286,7 @@ def main():
       DBusGMainLoop(set_as_default=True)
      
       #formatting 
-      _kwh = lambda p, v: (str(round(v, 2)) + ' KWh')
+      _kwh = lambda p, v: (str(round(v, 2)) + ' kWh')
       _a = lambda p, v: (str(round(v, 1)) + ' A')
       _w = lambda p, v: (str(round(v, 1)) + ' W')
       _v = lambda p, v: (str(round(v, 1)) + ' V')   
